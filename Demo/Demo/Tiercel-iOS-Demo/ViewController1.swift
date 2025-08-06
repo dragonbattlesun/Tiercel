@@ -21,7 +21,7 @@ class ViewController1: UIViewController {
 
 
 //    lazy var URLString = "https://officecdn-microsoft-com.akamaized.net/pr/C1297A47-86C4-4C1F-97FA-950631F94777/OfficeMac/Microsoft_Office_2016_16.10.18021001_Installer.pkg"
-    lazy var URLString = "http://dldir1.qq.com/qqfile/QQforMac/QQ_V4.2.4.dmg"
+    lazy var URLString = "https://d38qdauprblw1n.cloudfront.net/oss/upload/compress/zip/08c28b0c54904c64b81a949f82d382e1.zip"
     var sessionManager = appDelegate.sessionManager1
 
     override func viewDidLoad() {
@@ -35,13 +35,6 @@ class ViewController1: UIViewController {
                 // 下载成功
             } else {
                 // 其他状态
-            }
-        }.validateFile(code: "9e2a3650530b563da297c9246acaad5c", type: .md5) { [weak self] task in
-            self?.updateUI(task)
-            if task.validation == .correct {
-                // 文件正确
-            } else {
-                // 文件错误
             }
         }
     }
@@ -78,13 +71,6 @@ class ViewController1: UIViewController {
                 // 下载成功
             } else {
                 // 其他状态
-            }
-        }.validateFile(code: "9e2a3650530b563da297c9246acaad5c", type: .md5) { [weak self] (task) in
-            self?.updateUI(task)
-            if task.validation == .correct {
-                // 文件正确
-            } else {
-                // 文件错误
             }
         }
     }

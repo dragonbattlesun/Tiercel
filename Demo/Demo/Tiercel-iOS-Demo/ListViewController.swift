@@ -14,6 +14,7 @@ class ListViewController: UITableViewController {
 
     lazy var URLStrings: [String] = {
         return [
+            "https://d38qdauprblw1n.cloudfront.net/oss/upload/compress/zip/08c28b0c54904c64b81a949f82d382e1.zip",
             "https://officecdn-microsoft-com.akamaized.net/pr/C1297A47-86C4-4C1F-97FA-950631F94777/MacAutoupdate/Microsoft_Office_16.24.19041401_Installer.pkg",
             "http://dldir1.qq.com/qqfile/QQforMac/QQ_V6.5.2.dmg",
             "http://issuecdn.baidupcs.com/issue/netdisk/MACguanjia/BaiduNetdisk_mac_2.2.3.dmg",

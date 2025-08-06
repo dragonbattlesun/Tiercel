@@ -49,6 +49,9 @@ public struct SessionConfiguration {
 
     // 是否允许蜂窝网络下载
     public var allowsCellularAccess: Bool = false
+    
+    // 是否使用后台会话配置，false时使用前台会话配置以获得更快的下载速度
+    public var useBackgroundSession: Bool = true
 
     public init() {
 
