@@ -35,12 +35,15 @@ public class DownloadTask: Task<DownloadTask> {
 
     private var acceptableStatusCodes: Range<Int> { return 200..<300 }
     
+    private var isKVOAdded: Bool = false
+    
+    // 安全的 _sessionTask 属性，避免强制主线程执行
     private var _sessionTask: URLSessionDownloadTask? {
         willSet {
-            _sessionTask?.removeObserver(self, forKeyPath: "currentRequest")
+            safelyRemoveKVO(from: _sessionTask)
         }
         didSet {
-            _sessionTask?.addObserver(self, forKeyPath: "currentRequest", options: [.new], context: nil)
+            safelyAddKVO(to: _sessionTask)
         }
     }
     
@@ -137,14 +140,20 @@ public class DownloadTask: Task<DownloadTask> {
     
     
     deinit {
-        sessionTask?.removeObserver(self, forKeyPath: "currentRequest")
+        // 安全地移除 KVO 观察者
+        safelyRemoveKVO(from: sessionTask)
         NotificationCenter.default.removeObserver(self)
     }
     
     @objc private func fixDelegateMethodError() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            self.sessionTask?.suspend()
-            self.sessionTask?.resume()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self = self else { return }
+            // 确保在正确的队列中访问sessionTask，避免race condition
+            self.operationQueue.async {
+                guard let task = self.sessionTask, task.state == .running else { return }
+                task.suspend()
+                task.resume()
+            }
         }
     }
 
@@ -153,6 +162,19 @@ public class DownloadTask: Task<DownloadTask> {
         executer?.execute(self)
     }
     
+    // MARK: - KVO 安全辅助方法
+    private func safelyAddKVO(to task: URLSessionDownloadTask?) {
+        guard let task = task, !isKVOAdded else { return }
+        task.addObserver(self, forKeyPath: "currentRequest", options: [.new], context: nil)
+        isKVOAdded = true
+    }
+
+    private func safelyRemoveKVO(from task: URLSessionDownloadTask?) {
+        guard let task = task, isKVOAdded else { return }
+        // KVO 移除不会抛出异常，但可能会因为重复移除而崩溃
+        task.removeObserver(self, forKeyPath: "currentRequest")
+        isKVOAdded = false
+    }
 
 }
 
@@ -244,7 +266,19 @@ extension DownloadTask {
             operationQueue.async {
                 self.didComplete(.local)
             }
-        case .willSuspend, .willCancel, .willRemove:
+        case .willSuspend:
+            // 检查是否为卡死状态，如果controlExecuter为空说明之前的操作可能失败
+            if controlExecuter == nil {
+                controlExecuter = Executer(onMainQueue: onMainQueue, handler: handler)
+                operationQueue.async {
+                    self.didComplete(.local)
+                }
+            } else {
+                // 直接执行当前handler，避免重复状态处理
+                let executer = Executer(onMainQueue: onMainQueue, handler: handler)
+                executer.execute(self)
+            }
+        case .willCancel, .willRemove:
             break
         }
     }
@@ -261,7 +295,19 @@ extension DownloadTask {
             operationQueue.async {
                 self.didComplete(.local)
             }
-        case .willSuspend, .willCancel, .willRemove:
+        case .willCancel:
+            // 检查是否为卡死状态，如果controlExecuter为空说明之前的操作可能失败
+            if controlExecuter == nil {
+                controlExecuter = Executer(onMainQueue: onMainQueue, handler: handler)
+                operationQueue.async {
+                    self.didComplete(.local)
+                }
+            } else {
+                // 直接执行当前handler，避免重复状态处理
+                let executer = Executer(onMainQueue: onMainQueue, handler: handler)
+                executer.execute(self)
+            }
+        case .willSuspend, .willRemove:
             break
         }
     }
@@ -270,19 +316,47 @@ extension DownloadTask {
 
     internal func remove(completely: Bool = false, onMainQueue: Bool = true, handler: Handler<DownloadTask>? = nil) {
         isRemoveCompletely = completely
-        controlExecuter = Executer(onMainQueue: onMainQueue, handler: handler)
+        
         switch status {
         case .running:
+            controlExecuter = Executer(onMainQueue: onMainQueue, handler: handler)
             status = .willRemove
             sessionTask?.cancel()
         case .waiting, .suspended, .failed, .succeeded, .canceled, .removed:
+            controlExecuter = Executer(onMainQueue: onMainQueue, handler: handler)
             status = .willRemove
             operationQueue.async {
                 self.didComplete(.local)
             }
-        case .willSuspend, .willCancel, .willRemove:
-            break
+        case .willSuspend, .willCancel:
+            // 直接执行移除，不改变状态避免额外的状态转换
+            forceRemove(completely: completely, onMainQueue: onMainQueue, handler: handler)
+        case .willRemove:
+            // 检查是否为卡死状态，如果controlExecuter为空说明之前的操作可能失败
+            if controlExecuter == nil {
+                controlExecuter = Executer(onMainQueue: onMainQueue, handler: handler)
+                operationQueue.async {
+                    self.didComplete(.local)
+                }
+            } else {
+                // 直接执行当前handler，避免重复状态处理
+                let executer = Executer(onMainQueue: onMainQueue, handler: handler)
+                executer.execute(self)
+            }
         }
+    }
+    
+    private func forceRemove(completely: Bool, onMainQueue: Bool = true, handler: Handler<DownloadTask>? = nil) {
+        // 直接执行移除操作，避免状态机混乱
+        let previousStatus = status
+        isRemoveCompletely = completely
+        status = .removed
+        cache.remove(self, completely: completely)
+        manager?.didCancelOrRemove(self)
+        
+        // 执行回调
+        let executer = Executer(onMainQueue: onMainQueue, handler: handler)
+        executer.execute(self)
     }
 
 
@@ -458,6 +532,12 @@ extension DownloadTask {
 // MARK: - KVO
 extension DownloadTask {
     override public func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey : Any]?, context: UnsafeMutableRawPointer?) {
+        // 验证是否为我们关注的keyPath
+        guard keyPath == "currentRequest" else {
+            super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
+            return
+        }
+        
         if let change = change, let newRequest = change[NSKeyValueChangeKey.newKey] as? URLRequest, let url = newRequest.url {
             currentURL = url
             manager?.updateUrlMapper(with: self)
@@ -597,4 +677,7 @@ extension Array where Element == DownloadTask {
         }
         return self
     }
+    
 }
+
+   

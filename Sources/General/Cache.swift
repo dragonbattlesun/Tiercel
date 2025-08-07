@@ -47,6 +47,16 @@ public class Cache {
     internal weak var manager: SessionManager?
     
     private let decoder = PropertyListDecoder()
+
+    // 新增：判断任务是否为有效状态
+    private static func isValidTask(_ task: DownloadTask) -> Bool {
+        switch task.status {
+        case .willSuspend, .willCancel, .willRemove:
+            return false
+        default:
+            return true
+        }
+    }
     
     public static func defaultDiskCachePathClosure(_ cacheName: String) -> String {
         let dstPath = NSSearchPathForDirectoriesInDomains(.cachesDirectory, .userDomainMask, true).first!
@@ -196,12 +206,13 @@ extension Cache {
                 do {
                     let url = URL(fileURLWithPath: path)
                     let data = try Data(contentsOf: url)
-                    let tasks = try decoder.decode([DownloadTask].self, from: data)
-                    tasks.forEach { (task) in
+                    let decodedTasks = try decoder.decode([DownloadTask].self, from: data)
+                    let tasks = decodedTasks.filter(Self.isValidTask).map { task -> DownloadTask in
                         task.cache = self
-                        if task.status == .waiting  {
+                        if task.status == .waiting {
                             task.protectedState.write { $0.status = .suspended }
                         }
+                        return task
                     }
                     return tasks
                 } catch {
@@ -209,7 +220,7 @@ extension Cache {
                     return [DownloadTask]()
                 }
             } else {
-               return  [DownloadTask]()
+                return  [DownloadTask]()
             }
         }
     }
@@ -254,9 +265,11 @@ extension Cache {
 extension Cache {
     internal func storeTasks(_ tasks: [DownloadTask]) {
         debouncer.execute(on: ioQueue) {
+            // 新增：只保留有效状态的任务
+            let validTasks = tasks.filter(Self.isValidTask)
             var path = (self.downloadPath as NSString).appendingPathComponent("\(self.identifier)_Tasks.plist")
             do {
-                let data = try self.encoder.encode(tasks)
+                let data = try self.encoder.encode(validTasks)
                 let url = URL(fileURLWithPath: path)
                 try data.write(to: url)
             } catch {
@@ -319,11 +332,11 @@ extension Cache {
                     self.manager?.log(.error("update fileName failed",
                                              error: TiercelError.cacheError(reason: .cannotMoveItem(atPath: filePath,
                                                                                                     toPath: newFilePath,
-                                                                                                      error: error))))
+                                                                                                    error: error))))
                 }
             }
         }
-    }
+    }    
 }
 
 
@@ -351,8 +364,6 @@ extension Cache {
         }
     }
     
-
-    
     /// 删除保留在本地的缓存文件
     ///
     /// - Parameter task:
@@ -372,7 +383,7 @@ extension Cache {
                     }
                 }
             }
-
+            
         }
     }
 }

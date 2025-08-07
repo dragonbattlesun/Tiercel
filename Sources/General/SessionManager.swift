@@ -90,6 +90,11 @@ public class SessionManager {
         var speed: Int64 = 0
         var timeRemaining: Int64 = 0
         
+        // 缓存进度值，避免每次都计算
+        var cachedTotalProgress: Int64 = 0
+        var cachedCompletedProgress: Int64 = 0
+        var progressCacheValid: Bool = false
+        
         var progressExecuter: Executer<SessionManager>?
         var successExecuter: Executer<SessionManager>?
         var failureExecuter: Executer<SessionManager>?
@@ -166,8 +171,26 @@ public class SessionManager {
 
     private let _progress = Progress()
     public var progress: Progress {
-        _progress.completedUnitCount = tasks.reduce(0, { $0 + $1.progress.completedUnitCount })
-        _progress.totalUnitCount = tasks.reduce(0, { $0 + $1.progress.totalUnitCount })
+        // 1. 先只读判断缓存是否有效
+        let cacheValid = protectedState.read { $0.progressCacheValid }
+        if !cacheValid {
+            // 2. 重新统计并写入
+            let completed = tasks.reduce(0) { $0 + $1.progress.completedUnitCount }
+            let total = tasks.reduce(0) { $0 + $1.progress.totalUnitCount }
+            protectedState.write {
+                $0.cachedCompletedProgress = completed
+                $0.cachedTotalProgress = total
+                $0.progressCacheValid = true
+            }
+            _progress.completedUnitCount = completed
+            _progress.totalUnitCount = total
+        } else {
+            // 3. 只读缓存
+            protectedState.read { state in
+                _progress.completedUnitCount = state.cachedCompletedProgress
+                _progress.totalUnitCount = state.cachedTotalProgress
+            }
+        }
         return _progress
     }
 
@@ -634,6 +657,8 @@ extension SessionManager {
                 state.tasks.append(task)
                 state.taskMapper[task.url.absoluteString] = task
                 state.urlMapper[task.currentURL] = task.url
+                // 任务列表变化时使进度缓存失效
+                state.progressCacheValid = false
             }
         case let .remove(task):
             protectedState.write { state in
@@ -662,9 +687,15 @@ extension SessionManager {
                         }
                     }
                 }
+                // 任务移除时使进度缓存失效
+                state.progressCacheValid = false
             }
         case let .succeeded(task):
-            succeededTasks.append(task)
+            protectedState.write { state in
+                state.succeededTasks.append(task)
+                // 任务成功时使进度缓存失效
+                state.progressCacheValid = false
+            }
         case let .appendRunningTasks(task):
             protectedState.write { state in
                 state.runningTasks.append(task)
@@ -760,8 +791,14 @@ extension SessionManager {
             }
 #endif
         }
+        // 任务进度更新时，使进度缓存失效
+        invalidateProgressCache()
         progressExecuter?.execute(self)
         NotificationCenter.default.postNotification(name: SessionManager.runningNotification, sessionManager: self)
+    }
+    
+    private func invalidateProgressCache() {
+        protectedState.write { $0.progressCacheValid = false }
     }
     
     internal func didCancelOrRemove(_ task: DownloadTask) {
@@ -883,20 +920,30 @@ extension SessionManager {
     static let refreshInterval: Double = 1
 
     private func createTimer() {
-        if timer == nil {
-            timer = DispatchSource.makeTimerSource(flags: .strict, queue: operationQueue)
-            timer?.schedule(deadline: .now(), repeating: Self.refreshInterval)
-            timer?.setEventHandler(handler: { [weak self] in
+        // 使用异步操作避免死锁，通过原子操作确保线程安全
+        operationQueue.async { [weak self] in
+            guard let self = self else { return }
+            // 双重检查锁定模式，确保timer只创建一次
+            guard self.timer == nil else { return }
+            
+            let newTimer = DispatchSource.makeTimerSource(flags: .strict, queue: self.operationQueue)
+            newTimer.schedule(deadline: .now(), repeating: Self.refreshInterval)
+            newTimer.setEventHandler(handler: { [weak self] in
                 guard let self = self else { return }
                 self.updateSpeedAndTimeRemaining()
             })
-            timer?.resume()
+            self.timer = newTimer
+            newTimer.resume()
         }
     }
 
     private func invalidateTimer() {
-        timer?.cancel()
-        timer = nil
+        operationQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.timer?.setEventHandler(handler: nil) // 可选：彻底解除闭包
+            self.timer?.cancel()
+            self.timer = nil
+        }
     }
 
     internal func updateSpeedAndTimeRemaining() {
